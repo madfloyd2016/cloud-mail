@@ -6,6 +6,7 @@ on:
     paths:
       - "mail-worker/**"
       - "mail-vue/**"
+      - ".github/workflows/deploy-cloudflare.yml"
   workflow_dispatch:
 
 jobs:
@@ -222,35 +223,41 @@ jobs:
             exit 1
           fi
           
-          WORKER_URL=$(grep -o "https://.*\.workers\.dev" deploy.log || echo "")
+          WORKER_URL=$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' deploy.log | head -n 1 || true)
           
-          if [ -n "$WORKER_URL" ]; then
-            echo "::add-mask::$WORKER_URL"
+          if [ -z "$WORKER_URL" ]; then
+            echo "::error::Wrangler did not return a workers.dev URL. Confirm workers_dev = true in wrangler-action.toml."
+            exit 1
           fi
           
+          echo "::add-mask::$WORKER_URL"
           echo "worker_url=$WORKER_URL" >> $GITHUB_OUTPUT
-          echo "✅ Setup completed."
+          echo "✅ Deployment URL captured."
 
       - name: ♻️ Initialize database
         run: |
           echo "🛠️ Starting database initialization..."
           sleep 15
           
-          WORKER_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          WORKER_URL="${WORKER_URL:-${{ steps.deploy.outputs.worker_url }}}"
+          # Use workers.dev for automation; the custom domain may require a browser challenge.
+          WORKER_URL="${{ steps.deploy.outputs.worker_url }}"
           
           if [ -z "$WORKER_URL" ]; then
-            echo "❌ Preview URL not available. Please set CUSTOM_DOMAIN."
+            echo "::error::workers.dev URL is missing; check workers_dev = true in wrangler-action.toml."
             exit 1
           fi
           
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
+          echo "Initializing database through the Worker endpoint."
+          HTTP_CODE=$(curl -sS -L --retry 3 --retry-delay 5 --retry-connrefused --connect-timeout 15 --max-time 60 -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
           RESPONSE_BODY=$(cat response.txt)
 
-          if [ "$RESPONSE_BODY" = "success" ]; then
-            echo "✅ Setup completed."
+          if [ "$HTTP_CODE" = "200" ] && [ "$RESPONSE_BODY" = "success" ]; then
+            echo "✅ Database initialization completed."
           else
-            echo "❌ Failed. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
+            echo "❌ Database initialization failed. HTTP: $HTTP_CODE"
+            echo "Response preview (first 500 bytes):"
+            head -c 500 response.txt || true
+            echo
             exit 1
           fi
 
